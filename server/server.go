@@ -72,7 +72,10 @@ func handleRead(c *Client, h *Hub) {
 			continue
 		}
 
-        c.name = strings.TrimSpace(m.SenderName)
+        if c.name == "" {
+            c.name = strings.TrimSpace(m.SenderName)
+        }
+
 		m.Sender = c.id
 		h.broadcast <- m
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -16,6 +17,19 @@ type Client struct {
 	name string
 }
 
+type EventType int
+
+const (
+	EventInput EventType = iota
+	EventServer
+	EventQuit
+)
+
+type Event struct {
+	Type EventType
+	Data string
+}
+
 func Start(addr string) error {
 	conn, err := connect(addr)
 	if err != nil {
@@ -24,24 +38,54 @@ func Start(addr string) error {
 
 	defer conn.Close()
 
-	input := bufio.NewReader(os.Stdin)
+	events := make(chan Event)
+
+	stdin := bufio.NewReader(os.Stdin)
 	fmt.Print("name: ")
-	username, err := input.ReadString('\n')
+	username, err := stdin.ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("reading username: %v", err)
 	}
 
-    fmt.Printf(username)
+	fmt.Printf(username)
 
-	done := make(chan struct{})
-	out := make(chan string)
+	go readFromServer(conn, events)
+	go readFromUser(stdin, events)
 
-	go Present(out)
-	go readFromServer(conn, out, done)
+	fmt.Print("> ")
 
-    writeToServer(done, out, input, username, conn)
+	for {
+		ev := <-events
 
-    return nil
+		switch ev.Type {
+		case EventInput:
+			msg := protocol.Message{
+				Text:       ev.Data,
+				SenderName: strings.TrimSpace(username),
+			}
+
+			encoded, err := json.Marshal(msg)
+			encoded = append(encoded, '\n')
+
+			if _, err = conn.Write(encoded); err != nil {
+				return fmt.Errorf("start: reading stdin: %w", err)
+			}
+			fmt.Print("> ")
+
+		case EventServer:
+			var msg protocol.Message
+
+			if err := json.Unmarshal([]byte(ev.Data), &msg); err != nil {
+				return fmt.Errorf("unmarshal from server: %v", err)
+			}
+
+			fmt.Printf("%s says: %s", msg.SenderName, msg.Text)
+			fmt.Print("> ")
+		case EventQuit:
+			slog.Error(ev.Data)
+			return fmt.Errorf("error: %v", ev.Data)
+		}
+	}
 }
 
 func connect(addr string) (net.Conn, error) {
@@ -53,58 +97,28 @@ func connect(addr string) (net.Conn, error) {
 	return conn, nil
 }
 
-func readFromServer(conn net.Conn, res chan string, done chan struct{}) {
+func readFromServer(conn net.Conn, events chan<- Event) {
 	reader := bufio.NewReader(conn)
-	var m protocol.Message
 
 	for {
 		msg, err := reader.ReadString('\n')
 		if err != nil {
-			res <- fmt.Sprintf("readFromServer: %v", err)
-			close(done)
+			events <- Event{Type: EventQuit, Data: err.Error()}
 			return
 		}
 
-		err = json.Unmarshal([]byte(msg), &m)
-		if err != nil {
-			res <- fmt.Sprintf("readFromServer: %v", err)
-			close(done)
-			return
-		}
-
-		res <- fmt.Sprintf("%s says: %s", m.SenderName, m.Text)
-		res <- "> "
+		events <- Event{Type: EventServer, Data: msg}
 	}
 }
 
-func writeToServer(done <-chan struct{}, out chan<- string, stdin *bufio.Reader, username string, conn net.Conn) error { 
-    for {
-        select {
-        case <-done:
-            close(out)
-            return nil
-        default:
-        }
+func readFromUser(stdin *bufio.Reader, events chan<- Event) {
+	for {
+		msg, err := stdin.ReadString('\n')
+		if err != nil {
+			events <- Event{Type: EventQuit, Data: err.Error()}
+			return
+		}
 
-        out <- "> "
-        text, err := stdin.ReadString('\n')
-        if err != nil {
-            close(out)
-            return fmt.Errorf("start: reading stdin: %w", err)
-        }
-
-        msg := protocol.Message{
-            Text:   text,
-            SenderName: strings.TrimSpace(username),
-        }
-
-        encoded, err := json.Marshal(msg)
-        encoded = append(encoded, '\n')
-
-        _, err = conn.Write(encoded)
-        if err != nil {
-            close(out)
-            return fmt.Errorf("start: reading stdin: %w", err)
-        }
-    }
+		events <- Event{Type: EventInput, Data: msg}
+	}
 }
