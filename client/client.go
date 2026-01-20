@@ -17,19 +17,6 @@ type Client struct {
 	name string
 }
 
-type EventType int
-
-const (
-	EventInput EventType = iota
-	EventServer
-	EventQuit
-)
-
-type Event struct {
-	Type EventType
-	Data string
-}
-
 func Start(addr string) error {
 	conn, err := connect(addr)
 	if err != nil {
